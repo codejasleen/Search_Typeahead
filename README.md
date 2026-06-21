@@ -6,35 +6,14 @@ A backend-focused search typeahead (autocomplete) system that balances low-laten
 
 ```mermaid
 graph TD
-    subgraph Client Layer
-        UI[React UI Client - :5173]
-    end
+    Client["React UI Client (Vite)"]
+    Backend["Spring Boot Backend Service"]
+    Database[("H2 Database (SQL Relational)")]
+    Cache["Redis Cache (Sharded via Consistent Hashing)"]
 
-    subgraph Service Layer (Spring Boot Backend - :8080)
-        Controller[Search & Cache Controllers]
-        SS[Suggestion Service]
-        BS[Batch Write Service]
-        DC[Distributed Cache Routing]
-    end
-
-    subgraph Data Layer
-        DB[(H2 Database - SQL Primary)]
-        
-        subgraph Sharded Redis Cache (Consistent Hash Ring)
-            NodeA[node-a]
-            NodeB[node-b]
-            NodeC[node-c]
-        end
-    end
-
-    UI -->|GET /suggest, /trending <br/> POST /search| Controller
-    Controller --> SS
-    SS --> BS
-    SS --> DC
-    BS -->|Buffered Writes (5s interval)| DB
-    DC -->|Prefix Route| NodeA
-    DC -->|Prefix Route| NodeB
-    DC -->|Prefix Route| NodeC
+    Client -->|"API Requests (suggest / search / trending)"| Backend
+    Backend -->|"Async Buffered Writes (5s interval)"| Database
+    Backend -->|"Sharded Cache Lookup (node-a / node-b / node-c)"| Cache
 ```
 
 ---
