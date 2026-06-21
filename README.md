@@ -212,6 +212,11 @@ Inspect which Redis node contains the prefix data and verify hit/miss behavior.
 
 ---
 
+## Screenshort
+
+<img width="611" height="500" alt="image" src="https://github.com/user-attachments/assets/dbb3912e-5ee1-44db-b25a-7c0355231c73" />
+
+
 ## Complexity Analysis
 
 | Operation | Time Complexity | Details |
