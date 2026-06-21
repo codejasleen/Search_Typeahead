@@ -1,6 +1,6 @@
-# Search Typeahead System
+# Search Autocomplete (Typeahead) System
 
-A backend-focused search typeahead (autocomplete) system that balances low-latency reads with database-friendly write throughput, featuring a distributed cache and trending search boosts.
+A backend-focused search typeahead (autocomplete) system that balances low-latency reads with database-friendly write throughput, featuring a distributed sharded cache and trending search boosts.
 
 ## Architecture Diagram
 
@@ -26,13 +26,53 @@ A backend-focused search typeahead (autocomplete) system that balances low-laten
                    node-a node-b node-c
 ```
 
+---
+
+## Autocomplete Request Workflow
+
+Below is the request-response sequence when a user types a prefix into the client:
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Client as Client (React)
+    participant Service as Service (Spring Boot)
+    participant Ring as Hash Ring (Consistent Hashing)
+    participant Cache as Cache (Redis Shards)
+    participant DB as Database (H2 SQL)
+
+    User->>Client: Types prefix "sp"
+    Client->>Service: GET /api/suggest?q=sp
+    activate Service
+    Service->>Ring: Lookup node for "sp"
+    Ring-->>Service: Returns target node (e.g. node-b)
+    Service->>Cache: GET keys prefix:sp (from node-b)
+    activate Cache
+    alt Cache Hit
+        Cache-->>Service: Return cached suggestions
+    else Cache Miss
+        Cache-->>Service: Return null/empty
+        deactivate Cache
+        Service->>DB: Query top queries starting with "sp"
+        activate DB
+        DB-->>Service: Return matching records
+        deactivate DB
+        Service->>Cache: Save suggestions list to node-b
+    end
+    Service-->>Client: Top suggestions
+    deactivate Service
+    Client-->>User: Display autocomplete dropdown (symmetrical layout)
+```
+
+---
+
 ## Technology Stack
 
 - **Backend**: Java 17 (Spring Boot 3.2.5) with Spring Data JPA and Spring Data Redis
-- **Frontend**: React + Vite (Vanilla CSS, custom debounced hooks)
+- **Frontend**: React + Vite (Vanilla CSS, debounced hooks, soft light UI)
 - **Database (Source of Truth)**: H2 in-memory relational database
 - **Distributed Cache**: Redis (Dockerized), sharded across 3 logical cache nodes (`node-a`, `node-b`, `node-c`) via consistent hashing
-- **Dataset**: Python-generated corpus of 100,000+ unique queries following Zipf's Law distribution
+- **Dataset**: Top 100,000+ unique aggregated queries extracted and normalized from the real-world **AOL User Session Collection** (3.5M+ raw search logs).
 
 ---
 
@@ -49,12 +89,12 @@ A backend-focused search typeahead (autocomplete) system that balances low-laten
 ## How to Run (Step-by-Step)
 
 ### 1. Generate Dataset
-Navigate to the dataset directory and run the generator script:
+Navigate to the dataset directory and run the processing script:
 ```bash
 cd dataset
-python generate_dataset.py
+python process_aol_dataset.py
 ```
-This generates a `seed_queries.csv` containing ~100k+ unique queries and their search counts.
+This downloads the raw AOL log archive, extracts it, normalizes and aggregates the search terms, and writes the top 100,000 unique queries by frequency to `seed_queries.csv`.
 
 ### 2. Start Redis Cache
 Start the sharded cache instance in Docker:
@@ -92,8 +132,8 @@ Retrieve top-10 suggestions starting with the prefix.
 * **Response**:
   ```json
   [
-    { "query": "iphone", "score": 500000 },
-    { "query": "iphone 15 pro", "score": 24000 }
+    { "query": "google", "score": 39597 },
+    { "query": "google.com", "score": 9530 }
   ]
   ```
 
@@ -101,12 +141,13 @@ Retrieve top-10 suggestions starting with the prefix.
 Record a new search query (enqueued in batch service for aggregation).
 * **URL**: `/api/search`
 * **Method**: `POST`
-* **Body**: `{"query": "iphone 16"}`
+* **Body**: `{"query": "iphone"}`
 * **Response**:
   ```json
   {
-    "message": "Searched",
-    "query": "iphone 16"
+    "status": "success",
+    "message": "Searched successfully",
+    "query": "iphone"
   }
   ```
 
@@ -118,8 +159,8 @@ Get top trending searches, including recent search boosts.
 * **Response**:
   ```json
   [
-    { "query": "rtx 4090 specs", "score": 105000 },
-    { "query": "iphone 16", "score": 98000 }
+    { "query": "google", "score": 39597 },
+    { "query": "yahoo", "score": 17579 }
   ]
   ```
 
@@ -140,23 +181,23 @@ Inspect which Redis node contains the prefix data and verify hit/miss behavior.
 
 ---
 
-## Design Decisions
+## Design Decisions & Engineering Trade-offs
 
-1. **HashMap vs. Trie**
-   * **O(1) Lookup**: A HashMap offers direct key lookup, bypassing $O(L)$ pointer traversals in a Trie.
-   * **Simpler Distributed Caching**: Distributing prefix strings sharded by hash is much easier than partitioning a Trie tree structure across remote nodes.
-   * **Atomic Invalidation**: Invalidating cache records on flush is as simple as replacing single Redis hash fields.
+### 1. Pre-computed Prefix Cache vs. Dynamic Trie Querying
+* **Decision**: We map every input prefix (e.g., `i` -> `ip` -> `iph` -> `ipho` -> `iphon` -> `iphone`) directly to its top-10 complete suggestions inside Redis.
+* **Trade-off**: Storing all prefixes yields a higher memory footprint in Redis since queries generate $L$ separate prefix records. However, this shifts computation from query-time to write-time. Lookup times are absolute $O(1)$ hash fetches, guaranteeing sub-millisecond response times.
 
-2. **Separation of SQL and Redis**
-   * **H2 (SQL)** serves as the persistent source of truth holding raw search query frequencies.
-   * **Redis (Cache)** acts as a read-serving layer keeping ready-to-serve top-10 list formats mapped directly to input prefixes.
+### 2. TreeMap Ring Consistent Hashing vs. Simple Modulo Sharding
+* **Decision**: We distribute prefix caches across 3 Redis nodes using a TreeMap consistent hash ring with 150 virtual nodes per physical host.
+* **Trade-off**: Virtual nodes ring mapping incurs a minor $O(\log V)$ CPU routing lookup overhead compared to basic $O(1)$ modulo hashing. In return, it completely mitigates hot-spotting, ensures uniform key distribution, and avoids cascading cache misses/invalidation during scaling (adding/removing Redis nodes).
 
-3. **Consistent Hashing**
-   * **Virtual Nodes (150 per node)** are mapped on a TreeMap ring. This prevents key distribution imbalances (hotspots) and handles cluster growth/shrinkage gracefully with minimal re-sharding.
+### 3. Batch Write Buffer vs. Real-Time SQL Seeding
+* **Decision**: Incoming search writes are enqueued in-memory using a thread-safe `ConcurrentLinkedQueue`. A scheduled service (`BatchService`) flushes them to the H2 SQL database in bulk every 5 seconds.
+* **Trade-off**: There is a minimal durability trade-off: if the server crashes, search counts enqueued in the last 5 seconds of the memory queue are lost. However, this protects the relational database from write-starvation and locking contentions under heavy concurrent autocomplete submission traffic.
 
-4. **Batch Writes**
-   * High-throughput search calls are enqueued instantly into memory via a `ConcurrentLinkedQueue`.
-   * A scheduled worker (`BatchService`) drains and aggregates the queries every 5 seconds, executing single-batch SQL merge/upsert operations to limit database connection overhead.
+### 4. Application-Managed Routing vs. Redis Cluster
+* **Decision**: We manage consistent hashing routing directly inside Spring Boot application code.
+* **Trade-off**: This adds sharding and ring-state management logic into the service layer rather than offloading it to the cache layer. However, it completely eliminates the complex operations, configuration overhead, and multi-node coordination requirements of a standard Redis Cluster.
 
 ---
 
@@ -167,4 +208,4 @@ Inspect which Redis node contains the prefix data and verify hit/miss behavior.
 | **Autocomplete Suggest** | $O(1)$ | Direct HGET key-value fetch |
 | **Search Submission** | $O(1)$ | ConcurrentLinkedQueue insert |
 | **Batch Aggregation** | $O(N)$ | Aggregate query map ($N$ is queue size) |
-| **Consistent Hash Ring Routing** | $O(\log M)$ | ceilingEntry lookup on TreeMap ($M$ is virtual nodes count) |
+| **Consistent Hash Ring Routing** | $O(\log M)$ | TreeMap ceilingEntry lookup ($M$ is virtual nodes count) |
