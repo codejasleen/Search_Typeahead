@@ -2,20 +2,6 @@
 
 A backend-focused search typeahead (autocomplete) system that balances low-latency reads with database-friendly write throughput, featuring a distributed sharded cache and trending search boosts.
 
-## Architecture Diagram
-
-```mermaid
-graph TD
-    Client["React UI Client (Vite)"]
-    Backend["Spring Boot Backend Service"]
-    Database[("H2 Database (SQL Relational)")]
-    Cache["Redis Cache (Sharded via Consistent Hashing)"]
-
-    Client -->|"API Requests (suggest / search / trending)"| Backend
-    Backend -->|"Async Buffered Writes (5s interval)"| Database
-    Backend -->|"Sharded Cache Lookup (node-a / node-b / node-c)"| Cache
-```
-
 ---
 
 ## Autocomplete Request Workflow
