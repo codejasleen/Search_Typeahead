@@ -4,26 +4,37 @@ A backend-focused search typeahead (autocomplete) system that balances low-laten
 
 ## Architecture Diagram
 
-```
-         React UI (:5173)
-              │
-     GET /suggest  POST /search
-     GET /trending GET /cache/debug
-              │
-       Spring Boot (:8080)
-              │
-     SearchController
-     CacheController
-              │
-     SuggestionService
-              │
-     BatchService          DistributedCache
-         │                      │
-     H2 Database           Redis Cache
-  (query → count)      (prefix → top-10)
-  Source of Truth    Consistent Hash Ring
-                     ┌────┬────┐
-                   node-a node-b node-c
+```mermaid
+graph TD
+    subgraph Client Layer
+        UI[React UI Client - :5173]
+    end
+
+    subgraph Service Layer (Spring Boot Backend - :8080)
+        Controller[Search & Cache Controllers]
+        SS[Suggestion Service]
+        BS[Batch Write Service]
+        DC[Distributed Cache Routing]
+    end
+
+    subgraph Data Layer
+        DB[(H2 Database - SQL Primary)]
+        
+        subgraph Sharded Redis Cache (Consistent Hash Ring)
+            NodeA[node-a]
+            NodeB[node-b]
+            NodeC[node-c]
+        end
+    end
+
+    UI -->|GET /suggest, /trending <br/> POST /search| Controller
+    Controller --> SS
+    SS --> BS
+    SS --> DC
+    BS -->|Buffered Writes (5s interval)| DB
+    DC -->|Prefix Route| NodeA
+    DC -->|Prefix Route| NodeB
+    DC -->|Prefix Route| NodeC
 ```
 
 ---
