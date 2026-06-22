@@ -171,9 +171,6 @@ Inspect which Redis node contains the prefix data and verify hit/miss behavior.
 * **Decision**: Incoming search writes are enqueued in-memory using a thread-safe `ConcurrentLinkedQueue`. A scheduled service (`BatchService`) flushes them to the H2 SQL database in bulk every 5 seconds.
 * **Trade-off**: There is a minimal durability trade-off: if the server crashes, search counts enqueued in the last 5 seconds of the memory queue are lost. However, this protects the relational database from write-starvation and locking contentions under heavy concurrent autocomplete submission traffic.
 
-### 4. Application-Managed Routing vs. Redis Cluster
-* **Decision**: We manage consistent hashing routing directly inside Spring Boot application code.
-* **Trade-off**: This adds sharding and ring-state management logic into the service layer rather than offloading it to the cache layer. However, it completely eliminates the complex operations, configuration overhead, and multi-node coordination requirements of a standard Redis Cluster.
 
 ---
 
